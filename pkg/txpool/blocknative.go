@@ -1,21 +1,22 @@
 package txpool
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"os"
 	"time"
 
 	"github.com/cryptoriums/mempmon/pkg/config"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/gorilla/websocket"
+	"github.com/pkg/errors"
 )
 
-func (s *BlockNativeTxPool) Err() chan error {
-	return s.errChan
-}
+const ComponentName = "blocknative-mempmon"
 
 // BlockNativeMessage implements the TxPoolSource Message interface.
 type BlockNativeMessage struct {
@@ -71,28 +72,30 @@ type BlockNativeMessage struct {
 	} `json:"event"`
 }
 
-func (bt *BlockNativeMessage) TxInputData() ([]byte, error) {
-	return hex.DecodeString(bt.Event.Transaction.Input)
+func (self *BlockNativeMessage) TxInputData() ([]byte, error) {
+	return hex.DecodeString(self.Event.Transaction.Input)
 }
 
-func (bt *BlockNativeMessage) TxHash() string {
-	return bt.Event.Transaction.Hash
+func (self *BlockNativeMessage) TxHash() string {
+	return self.Event.Transaction.Hash
 }
 
 // BlockNativeTxPool implements TxPoolInterface.
 type BlockNativeTxPool struct {
+	logger log.Logger
 	*websocket.Conn
-	msg     chan *BlockNativeMessage
-	errChan chan error
+	msg   chan *BlockNativeMessage
+	close context.CancelFunc
+	ctx   context.Context
 }
 
-func (b *BlockNativeTxPool) subscribe(contractAddress common.Address, methodName string) error {
+func (self *BlockNativeTxPool) Subscribe(contractAddress common.Address, methodName string) error {
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true,
 	}
 	dialer := websocket.DefaultDialer
 	dialer.TLSClientConfig = tlsConfig
-	wsSubscriber, _, err := dialer.Dial(os.Getenv(config.BlocknativeWSURL), nil)
+	wsSubscriber, _, err := dialer.DialContext(self.ctx, os.Getenv(config.BlocknativeWSURL), nil)
 	if err != nil {
 		return err
 	}
@@ -134,53 +137,60 @@ func (b *BlockNativeTxPool) subscribe(contractAddress common.Address, methodName
 	if err != nil {
 		return err
 	}
-	b.Conn = wsSubscriber
+	self.Conn = wsSubscriber
 	return nil
 }
 
-func (b *BlockNativeTxPool) read() {
-	// Close the connection on the exit.
-	defer b.Conn.Close()
-
+func (self *BlockNativeTxPool) Run() error {
 	for {
-		_, nextNotification, err := b.Conn.ReadMessage()
-		if err != nil {
-			fmt.Printf("while read message from the ws connection: %v", err)
-			b.errChan <- err
-			return
+		select {
+		case <-self.ctx.Done():
+			return nil
+		default:
+			_, nextNotification, err := self.Conn.ReadMessage()
+			if err != nil {
+				return errors.Errorf("read message from the ws connection: %v", err)
+			}
+
+			msg := &BlockNativeMessage{}
+			err = json.Unmarshal(nextNotification, msg)
+			if err != nil {
+				return errors.Errorf("parsing message from the ws connection: %v", err)
+			}
+			if msg.TxHash() == "" {
+				continue
+			}
+			level.Info(self.logger).Log("msg", "sending subs message", "txHash", msg.TxHash())
+
+			select {
+			case <-self.ctx.Done():
+				return nil
+			case self.msg <- msg:
+			}
+
 		}
 
-		msg := &BlockNativeMessage{}
-		err = json.Unmarshal(nextNotification, msg)
-		if err != nil {
-			fmt.Printf("while parsing message from the ws connection: %v", err)
-			b.errChan <- err
-			return
-		}
-		b.msg <- msg
 	}
 }
 
-func NewBlocknativeTxPool() (b *BlockNativeTxPool, err error) {
-	return &BlockNativeTxPool{errChan: make(chan error), msg: make(chan *BlockNativeMessage)}, nil
+func NewBlocknativeTxPool(ctx context.Context, lgr log.Logger) (*BlockNativeTxPool, chan *BlockNativeMessage, error) {
+	msg := make(chan *BlockNativeMessage)
+	ctx, cncl := context.WithCancel(ctx)
+
+	return &BlockNativeTxPool{
+		msg:    msg,
+		ctx:    ctx,
+		close:  cncl,
+		logger: log.With(lgr, "component", ComponentName),
+	}, msg, nil
 }
 
-// func (b *BlockNativeTxPool) Close() error {
-// 	// Cleanly close the connection by sending a close message.
-// 	err := b.Conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-// 	if err != nil {
-// 		return err
-// 	}
-// 	return nil
-// }
-
-func (b *BlockNativeTxPool) WatchTxPool(contractAddress common.Address, methodName string) (*BlockNativeTxPool, <-chan *BlockNativeMessage, error) {
-	err := b.subscribe(contractAddress, methodName)
-	if err != nil {
-		return nil, nil, err
+func (self *BlockNativeTxPool) Stop() {
+	self.close()
+	if self.Conn.Close() != nil {
+		if err := self.Conn.Close(); err != nil {
+			level.Error(self.logger).Log("msg", "closing grpc connection", "err", err)
+		}
 	}
-
-	// Reading from the websocket connection forever.
-	go b.read()
-	return b, b.msg, nil
+	level.Info(self.logger).Log("msg", "closed")
 }
