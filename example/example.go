@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"syscall"
 
 	stdlog "log"
 
+	"github.com/cryptoriums/mempmon/pkg/config"
 	"github.com/cryptoriums/mempmon/pkg/logger"
-	"github.com/cryptoriums/mempmon/pkg/txpool"
+	"github.com/cryptoriums/mempmon/pkg/mempool/blocknative"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/joho/godotenv"
 	"github.com/oklog/run"
@@ -31,27 +33,25 @@ func main() {
 	{
 		g.Add(run.SignalHandler(context.Background(), syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM))
 
-		txpool, msgCh, err := txpool.NewBlocknativeTxPool(ctxGlobal, logger)
+		mempool, err := blocknative.New(logger, os.Getenv(config.BlocknativeWSURL), os.Getenv(config.BlocknativeDappID))
 		ExitOnErr(err, "creating mempool monitor")
-		err = txpool.Subscribe(common.HexToAddress("0xdac17f958d2ee523a2206206994597c13d831ec7"), "transfer")
+		err = mempool.Subscribe(ctxGlobal, common.HexToAddress("0xdac17f958d2ee523a2206206994597c13d831ec7"), "transfer")
 		ExitOnErr(err, "mempool monitor subscription")
 		g.Add(func() error {
-			return txpool.Run()
-		}, func(error) {
-			txpool.Stop()
-			close()
-		})
-
-		go func() {
 			for {
 				select {
 				case <-ctxGlobal.Done():
-					return
-				case msg := <-msgCh:
+					mempool.Close()
+					return nil
+				default:
+					msg, err := mempool.Read()
+					ExitOnErr(err, "mempool subscription read")
 					fmt.Printf("msg: %v \n", msg)
 				}
 			}
-		}()
+		}, func(error) {
+			close()
+		})
 
 		if err := g.Run(); err != nil {
 			stdlog.Println(fmt.Sprintf("%+v", errors.Wrapf(err, "run group stacktrace")))

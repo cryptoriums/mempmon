@@ -1,14 +1,12 @@
-package txpool
+package blocknative
 
 import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
-	"os"
 	"time"
 
-	"github.com/cryptoriums/mempmon/pkg/config"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -18,8 +16,8 @@ import (
 
 const ComponentName = "blocknative-mempmon"
 
-// BlockNativeMessage implements the TxPoolSource Message interface.
-type BlockNativeMessage struct {
+// Message implements the TxPoolSource Message interface.
+type Message struct {
 	Version       int       `json:"version"`
 	ServerVersion string    `json:"serverVersion"`
 	TimeStamp     time.Time `json:"timeStamp"`
@@ -72,30 +70,28 @@ type BlockNativeMessage struct {
 	} `json:"event"`
 }
 
-func (self *BlockNativeMessage) TxInputData() ([]byte, error) {
+func (self *Message) TxInputData() ([]byte, error) {
 	return hex.DecodeString(self.Event.Transaction.Input)
 }
 
-func (self *BlockNativeMessage) TxHash() string {
+func (self *Message) TxHash() string {
 	return self.Event.Transaction.Hash
 }
 
-// BlockNativeTxPool implements TxPoolInterface.
-type BlockNativeTxPool struct {
+// Mempool implements TxPoolInterface.
+type Mempool struct {
+	apiUrl string
+	apiKey string
 	logger log.Logger
 	*websocket.Conn
-	msg   chan *BlockNativeMessage
-	close context.CancelFunc
-	ctx   context.Context
 }
 
-func (self *BlockNativeTxPool) Subscribe(contractAddress common.Address, methodName string) error {
-	tlsConfig := &tls.Config{
+func (self *Mempool) Subscribe(ctx context.Context, contractAddress common.Address, methodName string) error {
+	dialer := websocket.DefaultDialer
+	dialer.TLSClientConfig = &tls.Config{
 		InsecureSkipVerify: true,
 	}
-	dialer := websocket.DefaultDialer
-	dialer.TLSClientConfig = tlsConfig
-	wsSubscriber, _, err := dialer.DialContext(self.ctx, os.Getenv(config.BlocknativeWSURL), nil)
+	wsSubscriber, _, err := dialer.DialContext(ctx, self.apiUrl, nil)
 	if err != nil {
 		return err
 	}
@@ -105,7 +101,7 @@ func (self *BlockNativeTxPool) Subscribe(contractAddress common.Address, methodN
 	"eventCode": "checkDappId",
 	"version": "1",
 	"timeStamp": "2021-01-01T00:00:00.000Z",
-	"dappId": "` + os.Getenv(config.BlocknativeDappID) + `",
+	"dappId": "` + self.apiKey + `",
 	"blockchain": {
 		"system": "ethereum",
 		"network": "main"
@@ -113,7 +109,7 @@ func (self *BlockNativeTxPool) Subscribe(contractAddress common.Address, methodN
 	}`
 	configMsg := `{
 		"timeStamp": "2021-01-01T00:00:00.000Z",
-		"dappId": "` + os.Getenv(config.BlocknativeDappID) + `",
+		"dappId": "` + self.apiKey + `",
 		"version": "1",
 		"blockchain": {
 		   "system": "ethereum",
@@ -137,56 +133,40 @@ func (self *BlockNativeTxPool) Subscribe(contractAddress common.Address, methodN
 	if err != nil {
 		return err
 	}
+
 	self.Conn = wsSubscriber
+
 	return nil
 }
 
-func (self *BlockNativeTxPool) Run() error {
+func (self *Mempool) Read() (*Message, error) {
 	for {
-		select {
-		case <-self.ctx.Done():
-			return nil
-		default:
-			_, nextNotification, err := self.Conn.ReadMessage()
-			if err != nil {
-				return errors.Errorf("read message from the ws connection: %v", err)
-			}
-
-			msg := &BlockNativeMessage{}
-			err = json.Unmarshal(nextNotification, msg)
-			if err != nil {
-				return errors.Errorf("parsing message from the ws connection: %v", err)
-			}
-			if msg.TxHash() == "" {
-				continue
-			}
-			level.Info(self.logger).Log("msg", "sending subs message", "txHash", msg.TxHash())
-
-			select {
-			case <-self.ctx.Done():
-				return nil
-			case self.msg <- msg:
-			}
-
+		_, nextNotification, err := self.Conn.ReadMessage()
+		if err != nil {
+			return nil, errors.Errorf("read message from the ws connection: %v", err)
 		}
 
+		msg := &Message{}
+		err = json.Unmarshal(nextNotification, msg)
+		if err != nil {
+			return nil, errors.Errorf("parsing message from the ws connection: %v", err)
+		}
+		if msg.TxHash() == "" { // For some rason the first few messages are empty.
+			continue
+		}
+		return msg, nil
 	}
 }
 
-func NewBlocknativeTxPool(ctx context.Context, lgr log.Logger) (*BlockNativeTxPool, chan *BlockNativeMessage, error) {
-	msg := make(chan *BlockNativeMessage)
-	ctx, cncl := context.WithCancel(ctx)
-
-	return &BlockNativeTxPool{
-		msg:    msg,
-		ctx:    ctx,
-		close:  cncl,
-		logger: log.With(lgr, "component", ComponentName),
-	}, msg, nil
+func New(logger log.Logger, apiUrl, apiKey string) (*Mempool, error) {
+	return &Mempool{
+		logger: log.With(logger, "component", ComponentName),
+		apiUrl: apiUrl,
+		apiKey: apiKey,
+	}, nil
 }
 
-func (self *BlockNativeTxPool) Stop() {
-	self.close()
+func (self *Mempool) Close() {
 	if self.Conn.Close() != nil {
 		if err := self.Conn.Close(); err != nil {
 			level.Error(self.logger).Log("msg", "closing grpc connection", "err", err)
