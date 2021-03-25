@@ -14,7 +14,11 @@ import (
 	"github.com/pkg/errors"
 )
 
-const ComponentName = "blocknative-mempmon"
+const (
+	BlocknativeDappID = "BLOCKNATIVE_DAPP_ID"
+	BlocknativeWSURL  = "BLOCKNATIVE_WS_URL"
+	ComponentName     = "blocknative-mempmon"
+)
 
 // Message implements the TxPoolSource Message interface.
 type Message struct {

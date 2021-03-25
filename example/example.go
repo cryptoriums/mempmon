@@ -3,16 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"syscall"
+	"time"
 
 	stdlog "log"
 
 	"github.com/cryptoriums/mempmon/pkg/config"
-	"github.com/cryptoriums/mempmon/pkg/logger"
 	"github.com/cryptoriums/mempmon/pkg/mempool/blocknative"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/go-kit/kit/log"
 	"github.com/joho/godotenv"
 	"github.com/oklog/run"
 	"github.com/pkg/errors"
@@ -20,14 +20,12 @@ import (
 
 // Watching Tether contract transfers using the Blocknative api.
 func main() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
-	}
+	logger := log.With(log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr)), "ts", log.TimestampFormat(func() time.Time { return time.Now().UTC() }, "Jan 02 15:04:05.99"), "caller", log.DefaultCaller)
+
+	ExitOnErr(godotenv.Load(), "loading .env file")
 
 	var g run.Group
 	ctxGlobal, close := context.WithCancel(context.Background())
-	logger := logger.NewLogger()
 
 	// Run groups.
 	{
