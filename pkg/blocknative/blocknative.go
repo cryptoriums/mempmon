@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/go-kit/kit/log"
@@ -15,24 +14,21 @@ import (
 )
 
 const (
-	BlocknativeDappID = "BLOCKNATIVE_DAPP_ID"
-	BlocknativeWSURL  = "BLOCKNATIVE_WS_URL"
-	ComponentName     = "blocknative-mempmon"
+	ComponentName = "blocknative-mempmon"
 )
 
 // Message implements the TxPoolSource Message interface.
 type Message struct {
-	Version       int       `json:"version"`
-	ServerVersion string    `json:"serverVersion"`
-	TimeStamp     time.Time `json:"timeStamp"`
-	ConnectionID  string    `json:"connectionId"`
-	UserAgent     string    `json:"userAgent"`
-	Status        string    `json:"status"`
+	Version       int    `json:"version"`
+	ServerVersion string `json:"serverVersion"`
+	ConnectionID  string `json:"connectionId"`
+	UserAgent     string `json:"userAgent"`
+	Status        string `json:"status"`
+	Reason        string `json:"reason"`
 	Event         struct {
-		TimeStamp    time.Time `json:"timeStamp"`
-		CategoryCode string    `json:"categoryCode"`
-		EventCode    string    `json:"eventCode"`
-		DappID       string    `json:"dappId"`
+		CategoryCode string `json:"categoryCode"`
+		EventCode    string `json:"eventCode"`
+		DappID       string `json:"dappId"`
 		Blockchain   struct {
 			System  string `json:"system"`
 			Network string `json:"network"`
@@ -50,10 +46,10 @@ type Message struct {
 			DecimalValue     string `json:"decimalValue"`
 		} `json:"contractCall"`
 		Transaction struct {
-			Status             string      `json:"status"`
-			MonitorID          string      `json:"monitorId"`
-			MonitorVersion     string      `json:"monitorVersion"`
-			PendingTimeStamp   time.Time   `json:"pendingTimeStamp"`
+			Status         string `json:"status"`
+			MonitorID      string `json:"monitorId"`
+			MonitorVersion string `json:"monitorVersion"`
+			// PendingTimeStamp   time.Time   `json:"pendingTimeStamp"`
 			PendingBlockNumber int         `json:"pendingBlockNumber"`
 			Hash               string      `json:"hash"`
 			From               string      `json:"from"`
@@ -84,10 +80,11 @@ func (self *Message) TxHash() string {
 
 // Mempool implements TxPoolInterface.
 type Mempool struct {
-	apiUrl string
-	apiKey string
-	logger log.Logger
-	*websocket.Conn
+	apiUrl  string
+	apiKey  string
+	logger  log.Logger
+	conn    *websocket.Conn
+	netName string
 }
 
 func (self *Mempool) Subscribe(ctx context.Context, contractAddress common.Address, methodName string) error {
@@ -95,29 +92,36 @@ func (self *Mempool) Subscribe(ctx context.Context, contractAddress common.Addre
 	dialer.TLSClientConfig = &tls.Config{
 		InsecureSkipVerify: true,
 	}
-	wsSubscriber, _, err := dialer.DialContext(ctx, self.apiUrl, nil)
+	conn, _, err := dialer.DialContext(ctx, self.apiUrl, nil)
 	if err != nil {
 		return err
 	}
 
-	initMsg := `{
+	self.conn = conn
+
+	msg := `{
+	"timeStamp": "2021-01-01T00:00:00.000Z",
 	"categoryCode": "initialize",
 	"eventCode": "checkDappId",
 	"version": "1",
-	"timeStamp": "2021-01-01T00:00:00.000Z",
 	"dappId": "` + self.apiKey + `",
 	"blockchain": {
 		"system": "ethereum",
-		"network": "main"
+		"network": "` + self.netName + `"
 	 }
 	}`
-	configMsg := `{
+	err = WriteAndCheckResp(conn, msg)
+	if err != nil {
+		return err
+	}
+
+	msg = `{
 		"timeStamp": "2021-01-01T00:00:00.000Z",
 		"dappId": "` + self.apiKey + `",
 		"version": "1",
 		"blockchain": {
 		   "system": "ethereum",
-		   "network": "main"
+		   "network": "` + self.netName + `"
 		},
 		"categoryCode": "configs",
 		"eventCode": "put",
@@ -128,52 +132,74 @@ func (self *Mempool) Subscribe(ctx context.Context, contractAddress common.Addre
 		}
 	}`
 
-	err = wsSubscriber.WriteMessage(websocket.TextMessage, []byte(initMsg))
+	err = WriteAndCheckResp(conn, msg)
+	if err != nil {
+		return err
+	}
+	level.Info(self.logger).Log("msg", "successful subscription to the memppool for TXs", "methodName", methodName)
+	return nil
+}
+
+func WriteAndCheckResp(conn *websocket.Conn, msg string) error {
+	err := conn.WriteMessage(websocket.TextMessage, []byte(msg))
 	if err != nil {
 		return err
 	}
 
-	err = wsSubscriber.WriteMessage(websocket.TextMessage, []byte(configMsg))
+	_, resp, err := conn.ReadMessage()
 	if err != nil {
-		return err
+		return errors.Errorf("read subscription message: %v", err)
 	}
 
-	self.Conn = wsSubscriber
+	respParser := &Message{}
+	err = json.Unmarshal(resp, respParser)
+	if err != nil {
+		return errors.Errorf("parsing subscription message err:%v rawMsg:%v", err, string(resp))
+	}
 
+	if respParser.Status != "ok" {
+		return errors.Errorf("subscription response error: %v", respParser.Reason)
+	}
 	return nil
 }
 
 func (self *Mempool) Read() (*Message, error) {
-	for {
-		_, nextNotification, err := self.Conn.ReadMessage()
-		if err != nil {
-			return nil, errors.Errorf("read message from the ws connection: %v", err)
-		}
-
-		msg := &Message{}
-		err = json.Unmarshal(nextNotification, msg)
-		if err != nil {
-			return nil, errors.Errorf("parsing message from the ws connection: %v", err)
-		}
-		if msg.TxHash() == "" { // For some rason the first few messages are empty.
-			continue
-		}
-		return msg, nil
+	_, msg, err := self.conn.ReadMessage()
+	if err != nil {
+		return nil, errors.Errorf("read message: %v", err)
 	}
+
+	msgParsed := &Message{}
+	err = json.Unmarshal(msg, msgParsed)
+	if err != nil {
+		return nil, errors.Errorf("parsing message: %v", err)
+	}
+	return msgParsed, nil
 }
 
-func New(logger log.Logger, apiUrl, apiKey string) (*Mempool, error) {
+func New(logger log.Logger, apiUrl, apiKey string, netID int) (*Mempool, error) {
+	var netName string
+	switch netID {
+	case 1:
+		netName = "main"
+	case 4:
+		netName = "rinkeby"
+	default:
+		return nil, errors.Errorf("network id not supported id:%v", netID)
+	}
+
 	return &Mempool{
-		logger: log.With(logger, "component", ComponentName),
-		apiUrl: apiUrl,
-		apiKey: apiKey,
+		logger:  log.With(logger, "component", ComponentName),
+		apiUrl:  apiUrl,
+		apiKey:  apiKey,
+		netName: netName,
 	}, nil
 }
 
 func (self *Mempool) Close() {
-	if self.Conn.Close() != nil {
-		if err := self.Conn.Close(); err != nil {
-			level.Error(self.logger).Log("msg", "closing grpc connection", "err", err)
+	if self.conn != nil {
+		if err := self.conn.Close(); err != nil {
+			level.Error(self.logger).Log("msg", "closing connection", "err", err)
 		}
 	}
 	level.Info(self.logger).Log("msg", "closed")

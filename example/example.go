@@ -9,8 +9,7 @@ import (
 
 	stdlog "log"
 
-	"github.com/cryptoriums/mempmon/pkg/config"
-	"github.com/cryptoriums/mempmon/pkg/mempool/blocknative"
+	"github.com/cryptoriums/mempmon/pkg/blocknative"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/go-kit/kit/log"
 	"github.com/joho/godotenv"
@@ -25,30 +24,23 @@ func main() {
 	ExitOnErr(godotenv.Load(), "loading .env file")
 
 	var g run.Group
-	ctxGlobal, close := context.WithCancel(context.Background())
 
 	// Run groups.
 	{
 		g.Add(run.SignalHandler(context.Background(), syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM))
 
-		mempool, err := blocknative.New(logger, os.Getenv(config.BlocknativeWSURL), os.Getenv(config.BlocknativeDappID))
+		mempool, err := blocknative.New(logger, os.Getenv("BLOCKNATIVE_WS_URL"), os.Getenv("BLOCKNATIVE_DAPP_ID"), 4)
 		ExitOnErr(err, "creating mempool monitor")
-		err = mempool.Subscribe(ctxGlobal, common.HexToAddress("0xdac17f958d2ee523a2206206994597c13d831ec7"), "transfer")
+		err = mempool.Subscribe(context.Background(), common.HexToAddress("0x88dF592F8eb5D7Bd38bFeF7dEb0fBc02cf3778a0"), "submitMiningSolution")
 		ExitOnErr(err, "mempool monitor subscription")
 		g.Add(func() error {
 			for {
-				select {
-				case <-ctxGlobal.Done():
-					mempool.Close()
-					return nil
-				default:
-					msg, err := mempool.Read()
-					ExitOnErr(err, "mempool subscription read")
-					fmt.Printf("msg: %v \n", msg)
-				}
+				msg, err := mempool.Read()
+				ExitOnErr(err, "mempool read")
+				fmt.Printf("msg: %v \n", msg)
 			}
 		}, func(error) {
-			close()
+			mempool.Close()
 		})
 
 		if err := g.Run(); err != nil {
