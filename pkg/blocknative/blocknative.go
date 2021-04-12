@@ -128,6 +128,19 @@ func (self *Mempool) Subscribe(ctx context.Context, contractAddress common.Addre
 		"config": {
 		  "scope": "` + contractAddress.Hex() + `",
 		  "filters": [{"contractCall.methodName":"` + methodName + `"}],
+		  "abi": [{
+			"constant": false,
+			"inputs": [
+				{"name": "_nonce", "type": "string"},
+				{"name": "_requestIds", "type": "uint256[5]"},
+				{"name": "_values", "type": "uint256[5]"}
+			],
+			"name": "submitMiningSolution",
+			"outputs": [],
+			"payable": false,
+			"stateMutability": "nonpayable",
+			"type": "function"
+		  }],
 		  "watchAddress": true
 		}
 	}`
