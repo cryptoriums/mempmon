@@ -3,9 +3,9 @@ package blocknative
 import (
 	"context"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 
+	"github.com/bonedaddy/go-blocknative/client"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -16,67 +16,6 @@ import (
 const (
 	ComponentName = "blocknative-mempmon"
 )
-
-// Message implements the TxPoolSource Message interface.
-type Message struct {
-	Version       int    `json:"version"`
-	ServerVersion string `json:"serverVersion"`
-	ConnectionID  string `json:"connectionId"`
-	UserAgent     string `json:"userAgent"`
-	Status        string `json:"status"`
-	Reason        string `json:"reason"`
-	Event         struct {
-		CategoryCode string `json:"categoryCode"`
-		EventCode    string `json:"eventCode"`
-		DappID       string `json:"dappId"`
-		Blockchain   struct {
-			System  string `json:"system"`
-			Network string `json:"network"`
-		} `json:"blockchain"`
-		ContractCall struct {
-			ContractType    string `json:"contractType"`
-			ContractAddress string `json:"contractAddress"`
-			MethodName      string `json:"methodName"`
-			Params          struct {
-				To    string `json:"_to"`
-				Value string `json:"_value"`
-			} `json:"params"`
-			ContractDecimals int    `json:"contractDecimals"`
-			ContractName     string `json:"contractName"`
-			DecimalValue     string `json:"decimalValue"`
-		} `json:"contractCall"`
-		Transaction struct {
-			Status         string `json:"status"`
-			MonitorID      string `json:"monitorId"`
-			MonitorVersion string `json:"monitorVersion"`
-			// PendingTimeStamp   time.Time   `json:"pendingTimeStamp"`
-			PendingBlockNumber int         `json:"pendingBlockNumber"`
-			Hash               string      `json:"hash"`
-			From               string      `json:"from"`
-			To                 string      `json:"to"`
-			Value              string      `json:"value"`
-			Gas                int         `json:"gas"`
-			GasPrice           string      `json:"gasPrice"`
-			GasPriceGwei       int         `json:"gasPriceGwei"`
-			Nonce              int         `json:"nonce"`
-			BlockHash          interface{} `json:"blockHash"`
-			BlockNumber        interface{} `json:"blockNumber"`
-			Input              string      `json:"input"`
-			Asset              string      `json:"asset"`
-			WatchedAddress     string      `json:"watchedAddress"`
-			Direction          string      `json:"direction"`
-			Counterparty       string      `json:"counterparty"`
-		} `json:"transaction"`
-	} `json:"event"`
-}
-
-func (self *Message) TxInputData() ([]byte, error) {
-	return hex.DecodeString(self.Event.Transaction.Input)
-}
-
-func (self *Message) TxHash() string {
-	return self.Event.Transaction.Hash
-}
 
 // Mempool implements TxPoolInterface.
 type Mempool struct {
@@ -164,25 +103,25 @@ func WriteAndCheckResp(conn *websocket.Conn, msg string) error {
 		return errors.Errorf("read subscription message: %v", err)
 	}
 
-	respParser := &Message{}
+	respParser := &client.EthTxPayload{}
 	err = json.Unmarshal(resp, respParser)
 	if err != nil {
 		return errors.Errorf("parsing subscription message err:%v rawMsg:%v", err, string(resp))
 	}
 
 	if respParser.Status != "ok" {
-		return errors.Errorf("subscription response error: %v", respParser.Reason)
+		return errors.Errorf("subscription response error")
 	}
 	return nil
 }
 
-func (self *Mempool) Read() (*Message, error) {
+func (self *Mempool) Read() (*client.EthTxPayload, error) {
 	_, msg, err := self.conn.ReadMessage()
 	if err != nil {
 		return nil, errors.Errorf("read message: %v", err)
 	}
 
-	msgParsed := &Message{}
+	msgParsed := &client.EthTxPayload{}
 	err = json.Unmarshal(msg, msgParsed)
 	if err != nil {
 		return nil, errors.Errorf("parsing message: %v", err)
